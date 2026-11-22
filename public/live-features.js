@@ -48,7 +48,7 @@
     radioTracks.splice(0, radioTracks.length, ...fixed, ...uploaded);
     if (typeof radioQueue !== "undefined") radioQueue = [];
     var label = document.querySelector(".radio-label");
-    if (label) label.textContent = "UK DISCOVERY ROTATION · " + radioTracks.length + " TRACKS";
+    if (label) label.textContent = (typeof radioMode !== "undefined" && radioMode === "uploads" ? "ARTIST UPLOADS" : "UK DISCOVERY ROTATION") + " · " + (typeof radioModeIndices === "function" ? radioModeIndices().length : radioTracks.length) + " TRACKS";
   }
 
   async function refreshDirectoryAndMusic() {
