@@ -190,7 +190,6 @@ function safeUser(row) {
     handle: row.handle,
     genre: row.genre,
     city: row.city,
-    publicKey: row.public_key || null,
     looking: row.looking || "",
     bio: row.bio || "",
     color: row.profile_color || "#d8e4d2",
@@ -213,29 +212,6 @@ function positiveId(value) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function isBase64Url(value, expectedBytes, maxBytes = 8192) {
-  if (typeof value !== "string" || !/^[A-Za-z0-9_-]+$/.test(value)) return false;
-  const bytes = Buffer.from(value, "base64url").length;
-  return bytes > 0 && bytes <= maxBytes && (expectedBytes === undefined || bytes === expectedBytes);
-}
-
-function validPublicKey(value) {
-  return isPlainObject(value) && value.kty === "EC" && value.crv === "P-256" &&
-    isBase64Url(value.x, 32, 32) && isBase64Url(value.y, 32, 32);
-}
-
-function validKeyBackup(value) {
-  return isPlainObject(value) && value.version === 1 && value.kdf === "PBKDF2-SHA256" &&
-    value.iterations === 600000 && isBase64Url(value.salt, 16, 16) &&
-    isBase64Url(value.iv, 12, 12) && isBase64Url(value.ciphertext, undefined, 2048);
-}
-
-function validKeyEnvelope(value) {
-  return isPlainObject(value) && validPublicKey(value.ephemeralPublicKey) &&
-    isBase64Url(value.salt, 16, 16) && isBase64Url(value.iv, 12, 12) &&
-    isBase64Url(value.ciphertext, 48, 48);
 }
 
 function regenerateSession(req) {
@@ -266,13 +242,10 @@ async function prepareDatabase() {
     "CREATE TABLE IF NOT EXISTS artists (" +
     "id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, " +
     "handle TEXT NOT NULL UNIQUE, genre TEXT NOT NULL, city TEXT NOT NULL, " +
-    "password_salt TEXT NOT NULL, password_hash TEXT NOT NULL, public_key JSONB, " +
-    "private_key_backup JSONB, looking TEXT NOT NULL DEFAULT '', bio TEXT NOT NULL DEFAULT '', " +
+    "password_salt TEXT NOT NULL, password_hash TEXT NOT NULL, looking TEXT NOT NULL DEFAULT '', bio TEXT NOT NULL DEFAULT '', " +
     "profile_color TEXT NOT NULL DEFAULT '#d8e4d2', profile_photo TEXT NOT NULL DEFAULT '', " +
     "created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
   );
-  await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS public_key JSONB");
-  await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS private_key_backup JSONB");
   await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS looking TEXT NOT NULL DEFAULT ''");
   await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT ''");
   await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS profile_color TEXT NOT NULL DEFAULT '#d8e4d2'");
@@ -312,13 +285,9 @@ async function prepareDatabase() {
     "CREATE TABLE IF NOT EXISTS messages (" +
     "id BIGSERIAL PRIMARY KEY, conversation_id UUID NOT NULL REFERENCES conversations(id) ON DELETE CASCADE, " +
     "sender_id BIGINT NOT NULL REFERENCES artists(id) ON DELETE CASCADE, " +
-    "body TEXT NOT NULL DEFAULT '[Encrypted message]' CHECK (char_length(body) BETWEEN 1 AND 2000), " +
-    "ciphertext TEXT, nonce TEXT, key_envelopes JSONB, client_id UUID, " +
+    "body TEXT NOT NULL CHECK (char_length(body) BETWEEN 1 AND 2000), client_id UUID, " +
     "created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
   );
-  await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS ciphertext TEXT");
-  await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS nonce TEXT");
-  await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS key_envelopes JSONB");
   await pool.query("ALTER TABLE messages ADD COLUMN IF NOT EXISTS client_id UUID");
   await pool.query("CREATE INDEX IF NOT EXISTS conversation_members_user_idx ON conversation_members(user_id, conversation_id)");
   await pool.query("CREATE INDEX IF NOT EXISTS messages_conversation_idx ON messages(conversation_id, id DESC)");
@@ -341,7 +310,7 @@ app.get("/api/auth/me", asyncRoute(async (req, res) => {
   }
   if (!userId) return res.json({ user: null });
   const result = await pool.query(
-    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,public_key FROM artists WHERE id = $1",
+    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo FROM artists WHERE id = $1",
     [userId]
   );
   if (!result.rows[0]) {
@@ -349,35 +318,6 @@ app.get("/api/auth/me", asyncRoute(async (req, res) => {
     return res.json({ user: null });
   }
   res.json({ user: safeUser(result.rows[0]) });
-}));
-
-app.get("/api/auth/key-bundle", requireUser, asyncRoute(async (req, res) => {
-  const result = await pool.query(
-    "SELECT public_key,private_key_backup FROM artists WHERE id=$1",
-    [currentUserId(req)]
-  );
-  if (!result.rows[0]) return res.status(404).json({ error: "Artist account not found." });
-  res.json({ publicKey: result.rows[0].public_key || null, privateKeyBackup: result.rows[0].private_key_backup || null });
-}));
-
-app.post("/api/auth/key-bundle", sameOrigin, requireUser, asyncRoute(async (req, res) => {
-  const input = isPlainObject(req.body) ? req.body : {};
-  const publicKey = input.publicKey;
-  const privateKeyBackup = input.privateKeyBackup;
-  if (!validPublicKey(publicKey) || !validKeyBackup(privateKeyBackup)) {
-    return res.status(400).json({ error: "The encrypted key backup could not be saved." });
-  }
-  const saved = await pool.query(
-    "UPDATE artists SET public_key=$1,private_key_backup=$2 WHERE id=$3 " +
-    "AND public_key IS NULL AND private_key_backup IS NULL RETURNING id",
-    [publicKey, privateKeyBackup, currentUserId(req)]
-  );
-  if (!saved.rows[0]) {
-    const exists = await pool.query("SELECT 1 FROM artists WHERE id=$1", [currentUserId(req)]);
-    if (!exists.rows[0]) return res.status(404).json({ error: "Artist account not found." });
-    return res.status(409).json({ error: "This account already has an encryption key. Key replacement is not available." });
-  }
-  res.status(201).json({ saved: true });
 }));
 
 app.post("/api/auth/register", sameOrigin, authLimiter, asyncRoute(async (req, res) => {
@@ -397,7 +337,7 @@ app.post("/api/auth/register", sameOrigin, authLimiter, asyncRoute(async (req, r
   try {
     created = await pool.query(
       "INSERT INTO artists (email,display_name,handle,genre,city,password_salt,password_hash) " +
-      "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,public_key",
+      "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo",
       [email, displayName, handle, genre, city, salt, passwordHash]
     );
   } catch (error) {
@@ -418,7 +358,7 @@ app.post("/api/auth/login", sameOrigin, authLimiter, asyncRoute(async (req, res)
     return res.status(400).json({ error: "Enter a valid email and password." });
   }
   const result = await pool.query(
-    "SELECT id,email,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,public_key,password_salt,password_hash FROM artists WHERE email = $1",
+    "SELECT id,email,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,password_salt,password_hash FROM artists WHERE email = $1",
     [email]
   );
   const artist = result.rows[0];
@@ -485,7 +425,7 @@ app.delete("/api/auth/account", sameOrigin, requireUser, asyncRoute(async (req, 
 app.get("/api/artists", publicContentLimiter, asyncRoute(async (req, res) => {
   const search = cleanString(req.query.search, 80);
   const result = await pool.query(
-    "SELECT id,display_name,handle,genre,city,public_key,looking,bio,profile_color,profile_photo FROM artists " +
+    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo FROM artists " +
     "WHERE ($1 = '' OR display_name ILIKE '%' || $1 || '%' OR handle ILIKE '%' || $1 || '%' " +
     "OR genre ILIKE '%' || $1 || '%' OR city ILIKE '%' || $1 || '%') " +
     "ORDER BY display_name LIMIT 100",
@@ -496,7 +436,7 @@ app.get("/api/artists", publicContentLimiter, asyncRoute(async (req, res) => {
 
 app.get("/api/artists/me", requireUser, asyncRoute(async (req, res) => {
   const result = await pool.query(
-    "SELECT id,display_name,handle,genre,city,public_key,looking,bio,profile_color,profile_photo FROM artists WHERE id=$1",
+    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo FROM artists WHERE id=$1",
     [currentUserId(req)]
   );
   if (!result.rows[0]) return res.status(404).json({ error: "Artist account not found." });
@@ -520,7 +460,7 @@ app.patch("/api/artists/me", sameOrigin, requireUser, asyncRoute(async (req, res
   try {
     const result = await pool.query(
       "UPDATE artists SET display_name=$1,handle=$2,genre=$3,city=$4,looking=$5,bio=$6,profile_color=$7,profile_photo=$8 " +
-      "WHERE id=$9 RETURNING id,display_name,handle,genre,city,public_key,looking,bio,profile_color,profile_photo",
+      "WHERE id=$9 RETURNING id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo",
       [displayName, handle, genre, city, looking, bio, profileColor, profilePhoto, currentUserId(req)]
     );
     if (!result.rows[0]) return res.status(404).json({ error: "Artist account not found." });
@@ -675,11 +615,10 @@ app.delete("/api/tracks/:trackId", sameOrigin, requireUser, asyncRoute(async (re
 app.get("/api/conversations", requireUser, asyncRoute(async (req, res) => {
   const result = await pool.query(
     "SELECT c.id,c.type,c.name,c.created_at,c.updated_at, " +
-    "COALESCE((SELECT json_agg(json_build_object('id',a.id,'displayName',a.display_name,'handle',a.handle,'publicKey',a.public_key) " +
+    "COALESCE((SELECT json_agg(json_build_object('id',a.id,'displayName',a.display_name,'handle',a.handle) " +
     "ORDER BY a.display_name) FROM conversation_members cm JOIN artists a ON a.id=cm.user_id " +
     "WHERE cm.conversation_id=c.id),'[]'::json) AS participants, " +
-    "(SELECT json_build_object('id',m.id,'text',CASE WHEN m.ciphertext IS NOT NULL THEN '[Encrypted message]' ELSE m.body END, " +
-    "'encrypted',m.ciphertext IS NOT NULL,'senderId',m.sender_id,'senderName',a.display_name,'createdAt',m.created_at) " +
+    "(SELECT json_build_object('id',m.id,'text',m.body,'senderId',m.sender_id,'senderName',a.display_name,'createdAt',m.created_at) " +
     "FROM messages m JOIN artists a ON a.id=m.sender_id WHERE m.conversation_id=c.id ORDER BY m.id DESC LIMIT 1) AS latest " +
     "FROM conversations c JOIN conversation_members own ON own.conversation_id=c.id " +
     "WHERE own.user_id=$1 ORDER BY c.updated_at DESC LIMIT 100",
@@ -706,11 +645,8 @@ app.post("/api/conversations/direct", sameOrigin, requireUser, asyncRoute(async 
   const otherId = positiveId(req.body.artistId);
   const userId = currentUserId(req);
   if (!otherId || otherId === userId) return res.status(400).json({ error: "Choose another artist." });
-  const ownAccount = await pool.query("SELECT public_key FROM artists WHERE id=$1", [userId]);
-  if (!ownAccount.rows[0]?.public_key) return res.status(409).json({ error: "Set up encrypted messaging before starting a conversation." });
-  const exists = await pool.query("SELECT id,public_key FROM artists WHERE id=$1", [otherId]);
+  const exists = await pool.query("SELECT id FROM artists WHERE id=$1", [otherId]);
   if (!exists.rows[0]) return res.status(404).json({ error: "That artist account was not found." });
-  if (!exists.rows[0].public_key) return res.status(409).json({ error: "That artist needs to set up encrypted messaging first." });
   const directKey = [userId, otherId].sort((a, b) => a - b).join(":");
   const client = await pool.connect();
   try {
@@ -750,14 +686,11 @@ app.post("/api/conversations/group", sameOrigin, requireUser, asyncRoute(async (
   }
   const ids = [...new Set([userId, ...otherIds])];
   const members = await pool.query(
-    "SELECT id,display_name,public_key FROM artists WHERE id=ANY($1::bigint[])",
+    "SELECT id,display_name FROM artists WHERE id=ANY($1::bigint[])",
     [ids]
   );
   if (members.rows.length !== ids.length) {
     return res.status(400).json({ error: "One of those artist accounts could not be found." });
-  }
-  if (members.rows.some(row => !row.public_key)) {
-    return res.status(409).json({ error: "Every artist needs to set up encrypted messaging before joining a group." });
   }
   const requestedName = cleanString(req.body.name, 50);
   const participantNames = members.rows.filter(row => Number(row.id) !== userId).map(row => row.display_name);
@@ -813,21 +746,16 @@ app.get("/api/conversations/:conversationId/messages", requireUser, asyncRoute(a
     return res.status(404).json({ error: "Conversation not found." });
   }
   const result = await pool.query(
-    "SELECT m.id,m.body AS text,m.ciphertext,m.nonce,m.client_id AS \"clientId\", " +
-    "m.key_envelopes -> $2::text AS \"keyEnvelope\",m.sender_id AS \"senderId\", " +
+    "SELECT m.id,m.body AS text,m.client_id AS \"clientId\",m.sender_id AS \"senderId\", " +
     "a.display_name AS \"senderName\",m.created_at AS \"createdAt\" " +
     "FROM messages m JOIN artists a ON a.id=m.sender_id WHERE m.conversation_id=$1 " +
     "ORDER BY m.id DESC LIMIT 100",
-    [conversationId, String(currentUserId(req))]
+    [conversationId]
   );
   res.json({ messages: result.rows.reverse().map(row => ({
     id: row.id,
-    text: row.ciphertext ? "[Encrypted message]" : row.text,
-    encrypted: Boolean(row.ciphertext),
-    ciphertext: row.ciphertext,
-    nonce: row.nonce,
+    text: row.text,
     clientId: row.clientId,
-    keyEnvelope: row.keyEnvelope,
     senderId: Number(row.senderId),
     senderName: row.senderName,
     createdAt: row.createdAt
@@ -838,40 +766,24 @@ app.post("/api/conversations/:conversationId/messages", sameOrigin, requireUser,
   const conversationId = req.params.conversationId;
   if (!/^[0-9a-f-]{36}$/i.test(conversationId)) return res.status(404).json({ error: "Conversation not found." });
   const input = isPlainObject(req.body) ? req.body : {};
-  const ciphertext = input.ciphertext;
-  const nonce = input.nonce;
-  const clientId = input.clientId;
-  const keyEnvelopes = input.keyEnvelopes;
-  if (!isBase64Url(ciphertext, undefined, 8192) || !isBase64Url(nonce, 12, 12) ||
-      typeof clientId !== "string" || !/^[0-9a-f-]{36}$/i.test(clientId) || !isPlainObject(keyEnvelopes)) {
-    return res.status(400).json({ error: "The encrypted message was not valid." });
+  const text = typeof input.text === "string" ? input.text.trim() : "";
+  const clientId = input.clientId == null ? null : input.clientId;
+  if (!text || text.length > 2000 ||
+      (clientId !== null && (typeof clientId !== "string" || !/^[0-9a-f-]{36}$/i.test(clientId)))) {
+    return res.status(400).json({ error: "Enter a message of up to 2,000 characters." });
   }
   if (!(await isMember(conversationId, currentUserId(req)))) {
     return res.status(404).json({ error: "Conversation not found." });
   }
-  const memberResult = await pool.query(
-    "SELECT cm.user_id,a.public_key FROM conversation_members cm " +
-    "JOIN artists a ON a.id=cm.user_id WHERE cm.conversation_id=$1 ORDER BY cm.user_id",
-    [conversationId]
-  );
-  const expectedRecipients = memberResult.rows.map(row => String(row.user_id)).sort();
-  const submittedRecipients = Object.keys(keyEnvelopes).sort();
-  if (submittedRecipients.length !== expectedRecipients.length ||
-      submittedRecipients.some((id, index) => id !== expectedRecipients[index]) ||
-      Object.values(keyEnvelopes).some(envelope => !validKeyEnvelope(envelope)) ||
-      memberResult.rows.some(row => !row.public_key)) {
-    return res.status(400).json({ error: "The encrypted message is missing a valid key for every conversation member." });
-  }
   const result = await pool.query(
-    "INSERT INTO messages (conversation_id,sender_id,body,ciphertext,nonce,key_envelopes,client_id) " +
-    "VALUES ($1,$2,'[Encrypted message]',$3,$4,$5,$6) " +
+    "INSERT INTO messages (conversation_id,sender_id,body,client_id) VALUES ($1,$2,$3,$4) " +
     "ON CONFLICT (sender_id,client_id) WHERE client_id IS NOT NULL DO NOTHING " +
     "RETURNING id,client_id AS \"clientId\",sender_id AS \"senderId\",created_at AS \"createdAt\"",
-    [conversationId, currentUserId(req), ciphertext, nonce, keyEnvelopes, clientId]
+    [conversationId, currentUserId(req), text, clientId]
   );
   if (!result.rows[0]) return res.status(409).json({ error: "This message was already sent." });
   const author = await pool.query("SELECT display_name FROM artists WHERE id=$1", [currentUserId(req)]);
-  const message = { ...result.rows[0], encrypted: true, senderName: author.rows[0].display_name };
+  const message = { ...result.rows[0], text, senderName: author.rows[0].display_name };
   await pool.query("UPDATE conversations SET updated_at=now() WHERE id=$1", [conversationId]);
   io.to("conversation:" + conversationId).emit("message:new", { conversationId });
   res.status(201).json({ message });
