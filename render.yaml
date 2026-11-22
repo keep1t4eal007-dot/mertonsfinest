@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: scenespool-api
+    runtime: docker
+    repo: https://github.com/keep1t4eal007-dot/mertonsfinest
+    branch: main
+    region: frankfurt
+    plan: 0.5c-512mb
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: FRONTEND_ORIGINS
+        value: https://project43331.websitepublisher.ai
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        fromDatabase:
+          name: scenespool-db
+          property: connectionString
+
+databases:
+  - name: scenespool-db
+    databaseName: scenespool
+    user: scenespool
+    region: frankfurt
+    postgresMajorVersion: "18"
+    plan: 0.1c-256mb
+    diskSizeGB: 1
+    storageAutoscalingEnabled: false
+    ipAllowList: []
