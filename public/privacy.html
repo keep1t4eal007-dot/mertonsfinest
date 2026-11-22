@@ -5,10 +5,10 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#f5f0e5">
 <title>Privacy & beta data — SceneSpool</title>
-<meta name="description" content="What SceneSpool stores, what appears publicly, and how encrypted messages work during this beta.">
+<meta name="description" content="What SceneSpool stores, what appears publicly, and how messages work during this beta.">
 <meta name="robots" content="noindex, nofollow">
 <meta property="og:title" content="Privacy & beta data — SceneSpool">
-<meta property="og:description" content="What SceneSpool stores, what appears publicly, and how encrypted messages work during this beta.">
+<meta property="og:description" content="What SceneSpool stores, what appears publicly, and how messages work during this beta.">
 <meta property="og:type" content="website">
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap');
@@ -23,7 +23,7 @@
 <main>
 <div class="eyebrow">Updated 22 November 2026</div>
 <h1>Your data, <em>in the scene.</em></h1>
-<p class="lead">SceneSpool is a beta community for UK artists. The site uses a shared server for artist accounts, public profiles, music uploads and encrypted messages.</p>
+<p class="lead">SceneSpool is a beta community for UK artists. The site uses a shared server for artist accounts, public profiles, music uploads, and direct and group messages.</p>
 <div class="notice"><strong>Before you join:</strong> profile details and uploaded tracks are public. Accounts are not email-verified, password reset is not available, and this beta has not had an independent security audit. The operator's privacy contact details are not yet listed; share only information you are comfortable putting in a public artist profile.</div>
 <section class="card">
 <h2>Artist accounts and profiles</h2>
@@ -37,17 +37,17 @@
 </section>
 <section class="card">
 <h2>Private and group messages</h2>
-<p>New message text is encrypted in your browser before it is sent. The server stores encrypted message text and encrypted key envelopes. It also stores account details, conversation members, who sent each message, timestamps and approximate message sizes.</p>
-<p>Your separate message recovery phrase is entered only in your browser and is not sent to the server. You need it to unlock encrypted message history on a new device. If you lose it, that history cannot be recovered. Key fingerprints are not automatically verified; compare them through a trusted separate channel. This version does not provide forward secrecy. The website host controls the code sent to browsers, and a malicious code change could read text before encryption or after decryption.</p>
+<p>Messages are sent over HTTPS and stored as ordinary text on the shared server. They are not end-to-end encrypted, so the service operator can access stored message content. The service also stores account details, conversation members, sender names and timestamps.</p>
+<p>Private and group conversations are visible to their members inside the app. Do not send passwords, financial details, or sensitive personal information in messages.</p>
 <p>Deleting your account removes your messages from the live database, but other people may already have seen or copied their contents.</p>
 </section>
 <section class="card">
 <h2>Sign-in and service providers</h2>
-<p>The browser keeps a short-lived sign-in token in session storage for up to 14 days; the server stores a hash of that token. The server and database run on Render. The public website is hosted by WebsitePublisher. SoundCloud may load when you use the radio, and Google Fonts may receive standard technical data when typefaces load. External event and creator links are governed by the destinations' own privacy terms.</p>
+<p>The browser keeps a short-lived sign-in token in session storage for up to 14 days; the server stores a hash of that token. The server and database run on Render. During this free beta, the web service may sleep while idle and the database expires 30 days after it is created; do not rely on this as permanent storage. The public website is hosted by WebsitePublisher. SoundCloud may load when you use the radio, and Google Fonts may receive standard technical data when typefaces load. External event and creator links are governed by the destinations' own privacy terms.</p>
 </section>
 <section class="card">
 <h2>Beta limits and contact</h2>
-<p>Email ownership is not verified, password recovery is not configured, and there is no automatic key-verification system. The operator's privacy contact details have not been supplied for this page yet. Add a public contact route before inviting a wider community or treating this beta as a fully supported service.</p>
+<p>Email ownership is not verified and password recovery is not configured. The operator's privacy contact details have not been supplied for this page yet. Add a public contact route before inviting a wider community or treating this beta as a fully supported service.</p>
 </section>
 </main>
 <a class="back" href="/">← Back to SceneSpool</a>
