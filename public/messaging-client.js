@@ -11,242 +11,15 @@
   var serverReady = false;
   var pendingArtistId = "";
   var renderVersion = 0;
-  var keyBundle = null;
-  var keyBundleLoaded = false;
-  var encryptionPrivateKey = null;
   var defaultApiBase = /(^localhost$|^127\.0\.0\.1$|\.onrender\.com$)/i.test(window.location.hostname) ? window.location.origin : "";
   var apiBase = String(window.SCENESPOOL_API_URL || defaultApiBase).replace(/\/$/, "");
   var apiToken = "";
   try { apiToken = sessionStorage.getItem("scenespoolApiToken") || ""; } catch (_) {}
-  var textEncoder = new TextEncoder();
-  var textDecoder = new TextDecoder();
-
-  var BACKUP_ITERATIONS = 600000;
-  var BACKUP_KDF = "PBKDF2-SHA256";
-  var BACKUP_AAD_PREFIX = "SceneSpool private key backup v1|";
 
   function escapeHtml(value) {
     return String(value == null ? "" : value).replace(/[&<>"']/g, function (char) {
       return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[char];
     });
-  }
-
-  function cryptoAvailable() {
-    return Boolean(window.crypto && window.crypto.subtle && window.isSecureContext);
-  }
-
-  function randomBytes(length) {
-    var result = new Uint8Array(length);
-    window.crypto.getRandomValues(result);
-    return result;
-  }
-
-  function toBase64Url(value) {
-    var bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
-    var binary = "";
-    for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return window.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
-  }
-
-  function fromBase64Url(value) {
-    var base64 = String(value || "").replace(/-/g, "+").replace(/_/g, "/");
-    while (base64.length % 4) base64 += "=";
-    var binary = window.atob(base64);
-    var bytes = new Uint8Array(binary.length);
-    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-    return bytes;
-  }
-
-  function messageContext(conversationId, clientId, senderId) {
-    return "SceneSpool message v1|" + conversationId + "|" + clientId + "|" + senderId;
-  }
-
-  function wrapContext(conversationId, clientId, recipientId) {
-    return "SceneSpool message key v1|" + conversationId + "|" + clientId + "|" + recipientId;
-  }
-
-  async function deriveBackupKey(passphrase, salt) {
-    var passwordMaterial = await window.crypto.subtle.importKey(
-      "raw", textEncoder.encode(passphrase), "PBKDF2", false, ["deriveKey"]
-    );
-    return window.crypto.subtle.deriveKey(
-      { name: "PBKDF2", salt: salt, iterations: BACKUP_ITERATIONS, hash: "SHA-256" },
-      passwordMaterial,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
-  }
-
-  async function importAccountPrivateKey(pkcs8) {
-    return window.crypto.subtle.importKey(
-      "pkcs8", pkcs8, { name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]
-    );
-  }
-
-  async function createPrivateKeyBackup(passphrase) {
-    if (!cryptoAvailable()) throw new Error("Open this site over HTTPS in a modern browser to set up encrypted messages.");
-    var pair = await window.crypto.subtle.generateKey(
-      { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]
-    );
-    var publicKey = await window.crypto.subtle.exportKey("jwk", pair.publicKey);
-    var privateBytes = new Uint8Array(await window.crypto.subtle.exportKey("pkcs8", pair.privateKey));
-    var salt = randomBytes(16);
-    var iv = randomBytes(12);
-    var backupKey = await deriveBackupKey(passphrase, salt);
-    var aad = textEncoder.encode(BACKUP_AAD_PREFIX + user.id);
-    var encryptedPrivateKey = await window.crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv, additionalData: aad }, backupKey, privateBytes
-    );
-    var privateKeyBackup = {
-      version: 1,
-      kdf: BACKUP_KDF,
-      iterations: BACKUP_ITERATIONS,
-      salt: toBase64Url(salt),
-      iv: toBase64Url(iv),
-      ciphertext: toBase64Url(encryptedPrivateKey)
-    };
-    var privateKey = await importAccountPrivateKey(privateBytes);
-    privateBytes.fill(0);
-    return { publicKey: publicKey, privateKeyBackup: privateKeyBackup, privateKey: privateKey };
-  }
-
-  async function unlockPrivateKey(passphrase) {
-    if (!cryptoAvailable()) throw new Error("Open this site over HTTPS in a modern browser to use encrypted messages.");
-    if (!keyBundle || !keyBundle.privateKeyBackup) throw new Error("This account has no encrypted key backup yet.");
-    var backup = keyBundle.privateKeyBackup;
-    if (backup.version !== 1 || backup.kdf !== BACKUP_KDF || backup.iterations !== BACKUP_ITERATIONS) {
-      throw new Error("This account's encrypted key backup uses an unsupported format.");
-    }
-    var backupKey = await deriveBackupKey(passphrase, fromBase64Url(backup.salt));
-    var aad = textEncoder.encode(BACKUP_AAD_PREFIX + user.id);
-    var privateBytes = new Uint8Array(await window.crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: fromBase64Url(backup.iv), additionalData: aad },
-      backupKey,
-      fromBase64Url(backup.ciphertext)
-    ));
-    encryptionPrivateKey = await importAccountPrivateKey(privateBytes);
-    privateBytes.fill(0);
-  }
-
-  async function wrapMessageKey(rawMessageKey, publicJwk, conversationId, clientId, recipientId) {
-    var ephemeral = await window.crypto.subtle.generateKey(
-      { name: "ECDH", namedCurve: "P-256" }, true, ["deriveBits"]
-    );
-    var recipientPublicKey = await window.crypto.subtle.importKey(
-      "jwk", publicJwk, { name: "ECDH", namedCurve: "P-256" }, false, []
-    );
-    var sharedSecret = await window.crypto.subtle.deriveBits(
-      { name: "ECDH", public: recipientPublicKey }, ephemeral.privateKey, 256
-    );
-    var salt = randomBytes(16);
-    var context = textEncoder.encode(wrapContext(conversationId, clientId, recipientId));
-    var hkdfKey = await window.crypto.subtle.importKey("raw", sharedSecret, "HKDF", false, ["deriveKey"]);
-    var wrappingKey = await window.crypto.subtle.deriveKey(
-      { name: "HKDF", hash: "SHA-256", salt: salt, info: context },
-      hkdfKey,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt"]
-    );
-    var iv = randomBytes(12);
-    var wrappedKey = await window.crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv, additionalData: context }, wrappingKey, rawMessageKey
-    );
-    return {
-      ephemeralPublicKey: await window.crypto.subtle.exportKey("jwk", ephemeral.publicKey),
-      salt: toBase64Url(salt),
-      iv: toBase64Url(iv),
-      ciphertext: toBase64Url(wrappedKey)
-    };
-  }
-
-  async function unwrapMessageKey(envelope, conversationId, clientId, recipientId) {
-    if (!envelope || !encryptionPrivateKey) throw new Error("This encrypted message has no key for your account.");
-    var ephemeralPublicKey = await window.crypto.subtle.importKey(
-      "jwk", envelope.ephemeralPublicKey, { name: "ECDH", namedCurve: "P-256" }, false, []
-    );
-    var sharedSecret = await window.crypto.subtle.deriveBits(
-      { name: "ECDH", public: ephemeralPublicKey }, encryptionPrivateKey, 256
-    );
-    var salt = fromBase64Url(envelope.salt);
-    var context = textEncoder.encode(wrapContext(conversationId, clientId, recipientId));
-    var hkdfKey = await window.crypto.subtle.importKey("raw", sharedSecret, "HKDF", false, ["deriveKey"]);
-    var wrappingKey = await window.crypto.subtle.deriveKey(
-      { name: "HKDF", hash: "SHA-256", salt: salt, info: context },
-      hkdfKey,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["decrypt"]
-    );
-    return new Uint8Array(await window.crypto.subtle.decrypt(
-      { name: "AES-GCM", iv: fromBase64Url(envelope.iv), additionalData: context },
-      wrappingKey,
-      fromBase64Url(envelope.ciphertext)
-    ));
-  }
-
-  async function encryptMessage(chat, text) {
-    if (!encryptionPrivateKey) throw new Error("Unlock your encrypted message key first.");
-    var clientId = window.crypto.randomUUID();
-    var rawMessageKey = randomBytes(32);
-    var messageKey = await window.crypto.subtle.importKey(
-      "raw", rawMessageKey, { name: "AES-GCM" }, false, ["encrypt"]
-    );
-    var iv = randomBytes(12);
-    var aad = textEncoder.encode(messageContext(chat.id, clientId, user.id));
-    var ciphertext = await window.crypto.subtle.encrypt(
-      { name: "AES-GCM", iv: iv, additionalData: aad }, messageKey, textEncoder.encode(text)
-    );
-    var envelopes = {};
-    for (var i = 0; i < chat.participants.length; i++) {
-      var participant = chat.participants[i];
-      if (!participant.publicKey) throw new Error("A conversation member needs to set up encrypted messaging first.");
-      envelopes[String(participant.id)] = await wrapMessageKey(
-        rawMessageKey, participant.publicKey, chat.id, clientId, participant.id
-      );
-    }
-    rawMessageKey.fill(0);
-    return {
-      clientId: clientId,
-      ciphertext: toBase64Url(ciphertext),
-      nonce: toBase64Url(iv),
-      keyEnvelopes: envelopes
-    };
-  }
-
-  async function decryptMessage(chat, message) {
-    if (!message.encrypted) return Object.assign({}, message, { legacy: true });
-    try {
-      var rawMessageKey = await unwrapMessageKey(
-        message.keyEnvelope, chat.id, message.clientId, user.id
-      );
-      var messageKey = await window.crypto.subtle.importKey(
-        "raw", rawMessageKey, { name: "AES-GCM" }, false, ["decrypt"]
-      );
-      rawMessageKey.fill(0);
-      var aad = textEncoder.encode(messageContext(chat.id, message.clientId, message.senderId));
-      var plaintext = await window.crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: fromBase64Url(message.nonce), additionalData: aad },
-        messageKey,
-        fromBase64Url(message.ciphertext)
-      );
-      return Object.assign({}, message, { text: textDecoder.decode(plaintext), legacy: false });
-    } catch (_) {
-      return Object.assign({}, message, {
-        text: "Unable to decrypt this message. Check that you unlocked the correct recovery phrase.",
-        decryptionFailed: true,
-        legacy: false
-      });
-    }
-  }
-
-  async function fingerprint(publicKey) {
-    var canonical = JSON.stringify({ kty: publicKey.kty, crv: publicKey.crv, x: publicKey.x, y: publicKey.y });
-    var digest = new Uint8Array(await window.crypto.subtle.digest("SHA-256", textEncoder.encode(canonical)));
-    return Array.from(digest.slice(0, 16)).map(function (byte) {
-      return byte.toString(16).padStart(2, "0").toUpperCase();
-    }).join("").match(/.{1,4}/g).join("-");
   }
 
   async function api(path, method, body, extraHeaders) {
@@ -319,7 +92,7 @@
     }
     return conversations.map(function (chat) {
       var last = chat.latest;
-      var preview = last ? (last.encrypted ? "🔒 Encrypted message" : last.text) : "Start the conversation";
+      var preview = last ? last.text : "Start the conversation";
       var isGroup = chat.type === "group";
       return '<button class="chat-list-item ' + (chat.id === activeId ? "active" : "") +
         '" type="button" data-open-chat="' + escapeHtml(chat.id) + '">' +
@@ -344,23 +117,18 @@
       return '<div class="chat-message ' + (mine ? "mine" : "") + '">' +
         '<div class="chat-message-author">' + escapeHtml(mine ? "You" : message.senderName) + '</div>' +
         '<div class="chat-message-bubble">' + escapeHtml(message.text).replace(/\n/g, "<br>") + '</div>' +
-        '<time>' + (message.legacy ? 'Older message · not encrypted · ' : '🔒 E2EE · ') +
-        escapeHtml(formattedTime(message.createdAt, false)) + '</time></div>';
+        '<time>' + escapeHtml(formattedTime(message.createdAt, false)) + '</time></div>';
     }).join("") : '<div class="chat-thread-empty"><span>♫</span><strong>Start the conversation.</strong>' +
       '<p>Share a link, idea or a quick hello with ' + escapeHtml(titleFor(chat)) + '.</p></div>';
-    var legacyNotice = messages.some(function (message) { return message.legacy; })
-      ? '<div class="messages-preview-note"><span>!</span><p><strong>Older messages:</strong> messages sent before encryption was added remain unencrypted in the database.</p></div>'
-      : "";
-
     return '<div class="chat-conversation-head"><div><div class="eyebrow">' +
       (chat.type === "group" ? "Group chat" : "Direct message") + '</div><h2>' +
-      escapeHtml(titleFor(chat)) + '</h2><p>' + escapeHtml(detail) + '</p></div>' +
-      '<div class="chat-head-actions"><button class="chat-lock" type="button" data-key-fingerprints>✦ END-TO-END ENCRYPTED · CHECK KEYS</button>' +
-      '</div></div>' + legacyNotice + '<div class="chat-thread" id="chatThread" aria-live="polite">' +
-      contents + '</div><form class="chat-compose" id="chatComposeForm" data-chat-id="' +
+      escapeHtml(titleFor(chat)) + '</h2><p>' + escapeHtml(detail) + '</p></div></div>' +
+      '<div class="messages-preview-note"><span>i</span><p>Messages are stored on the shared server and sent over HTTPS. They are not end-to-end encrypted.</p></div>' +
+      '<div class="chat-thread" id="chatThread" aria-live="polite">' + contents +
+      '</div><form class="chat-compose" id="chatComposeForm" data-chat-id="' +
       escapeHtml(chat.id) + '"><label class="sr-only" for="chatMessageText">Write a message</label>' +
       '<textarea id="chatMessageText" name="message" maxlength="2000" required rows="2" ' +
-      'placeholder="Write a message…"></textarea><div><small>Encrypted on your device · members only</small>' +
+      'placeholder="Write a message…"></textarea><div><small>Visible to conversation members · sent over HTTPS</small>' +
       '<button class="btn btn-dark" type="submit">Send ↗</button></div></form>';
   }
 
@@ -374,7 +142,7 @@
       : "";
     return '<section class="messages-page"><div class="messages-heading"><div><div class="eyebrow">Artist-to-artist messages</div>' +
       '<h1>Your <em>messages.</em></h1><p>Sign in to message artists and make group chats.</p></div></div>' +
-      '<div class="messages-preview-note"><span>✦</span><p><strong>End-to-end encryption:</strong> message text is encrypted on your device. Your separate recovery phrase is never sent to the server; if you lose it, your old message history cannot be recovered.</p></div>' +
+      '<div class="messages-preview-note"><span>✦</span><p><strong>About messages:</strong> chats are stored on the shared server and visible to conversation members. They are not end-to-end encrypted.</p></div>' +
       '<div class="chat-auth-wrap"><div class="chat-create-card"><div class="eyebrow">' +
       (register ? "Join the community" : "Welcome back") + '</div><h2>' +
       (register ? "Create your artist account." : "Sign in to your account.") + '</h2>' +
@@ -388,27 +156,6 @@
       '<div class="chat-create-actions"><button class="btn btn-outline" type="button" data-auth-mode="' +
       (register ? "login" : "register") + '">' + (register ? "I already have an account" : "Create an account") +
       '</button><button class="btn btn-dark" type="submit">' + (register ? "Create account ↗" : "Sign in ↗") +
-      '</button></div></form></div></div></section>';
-  }
-
-  function encryptionKeyPage(mode, error) {
-    var unlock = mode === "unlock";
-    var title = unlock ? "Unlock your encrypted messages." : "Set up message encryption.";
-    var intro = unlock
-      ? "Enter the message recovery phrase you created for this account. It is different from your sign-in password."
-      : "Create a separate recovery phrase for your message key. Use at least 16 characters and save it somewhere safe.";
-    return '<section class="messages-page"><div class="messages-heading"><div><div class="eyebrow">Encrypted artist messages</div>' +
-      '<h1>Your <em>messages.</em></h1><p>Only conversation members can decrypt the message text.</p></div></div>' +
-      '<div class="messages-preview-note"><span>✦</span><p><strong>Keep this phrase safe:</strong> the server does not receive it. If you forget it, no one can unlock your encrypted message history.</p></div>' +
-      '<div class="chat-auth-wrap"><div class="chat-create-card"><div class="eyebrow">' +
-      (unlock ? "Unlock on this device" : "Create your encrypted key") + '</div><h2>' + escapeHtml(title) + '</h2>' +
-      '<p>' + escapeHtml(intro) + '</p><form id="chatKeyForm" data-mode="' + (unlock ? "unlock" : "setup") + '">' +
-      '<label class="chat-form-label">Message recovery phrase<input class="chat-create-input" name="passphrase" type="password" required minlength="16" maxlength="256" autocomplete="' +
-      (unlock ? "current-password" : "new-password") + '"></label>' +
-      (unlock ? "" : '<label class="chat-form-label">Confirm recovery phrase<input class="chat-create-input" name="passphraseConfirm" type="password" required minlength="16" maxlength="256" autocomplete="new-password"></label>') +
-      '<p class="chat-auth-hint">This is not your sign-in password. It is used only in your browser to protect your private message key.</p>' +
-      '<p class="chat-create-error" id="chatKeyError" role="status">' + escapeHtml(error || "") + '</p>' +
-      '<div class="chat-create-actions"><button class="btn btn-dark" type="submit">' + (unlock ? "Unlock messages ↗" : "Create encrypted key ↗") +
       '</button></div></form></div></div></section>';
   }
 
@@ -461,27 +208,6 @@
         root.innerHTML = authPage(error);
         return;
       }
-      if (!keyBundleLoaded) {
-        keyBundle = await api("/auth/key-bundle");
-        keyBundleLoaded = true;
-      }
-      if (!cryptoAvailable()) {
-        root.innerHTML = '<section class="messages-page"><div class="chat-empty"><span>🔒</span><h2>Secure browser connection needed.</h2>' +
-          '<p>Encrypted messaging needs HTTPS and a modern browser with Web Crypto support.</p></div></section>';
-        return;
-      }
-      if (!keyBundle.publicKey && !keyBundle.privateKeyBackup) {
-        root.innerHTML = encryptionKeyPage("setup");
-        return;
-      }
-      if (!keyBundle.publicKey || !keyBundle.privateKeyBackup) {
-        root.innerHTML = encryptionKeyPage("setup", "This account's key backup is incomplete. Contact the server owner before continuing.");
-        return;
-      }
-      if (!encryptionPrivateKey) {
-        root.innerHTML = encryptionKeyPage("unlock");
-        return;
-      }
       socketConnect();
       var result = await Promise.all([api("/conversations"), api("/artists")]);
       conversations = result[0].conversations || [];
@@ -493,14 +219,14 @@
       var messages = [];
       if (active) {
         var storedMessages = (await api("/conversations/" + encodeURIComponent(active.id) + "/messages")).messages || [];
-        messages = await Promise.all(storedMessages.map(function (message) { return decryptMessage(active, message); }));
+        messages = storedMessages;
       }
       if (version !== renderVersion) return;
       root.innerHTML = '<section class="messages-page"><div class="messages-heading"><div><div class="eyebrow">Make the next move together</div>' +
         '<h1>Your <em>messages.</em></h1><p>Direct conversations and group chats with UK artists.</p></div>' +
         '<div class="messages-actions"><button class="btn btn-outline" type="button" data-new-chat="direct">New message +</button>' +
         '<button class="btn btn-dark" type="button" data-new-chat="group">New group +</button></div></div>' +
-        '<div class="messages-preview-note"><span>✦</span><p><strong>End-to-end encrypted:</strong> messages are encrypted on your device and decrypted only for conversation members. Keep your separate recovery phrase safe; it cannot be reset.</p></div>' +
+        '<div class="messages-preview-note"><span>✦</span><p><strong>About messages:</strong> messages are stored on the shared server and visible to conversation members. They are sent over HTTPS but are not end-to-end encrypted.</p></div>' +
         '<div class="messages-layout"><aside class="chat-sidebar"><div class="chat-sidebar-title"><span>Conversations</span><span>' +
         conversations.length + '</span></div><div class="chat-list">' + conversationList() + '</div></aside>' +
         '<section class="chat-panel" aria-label="Conversation">' +
@@ -529,61 +255,6 @@
           escapeHtml(failure.message || "The message service is unavailable. Try again.") + '</p></div>' +
           '<button class="btn btn-outline" type="button" data-retry-messages>Try again</button></section>';
       }
-    }
-  }
-
-  async function submitKeySetup(form) {
-    var formData = new FormData(form);
-    var passphrase = String(formData.get("passphrase") || "");
-    try {
-      if (form.dataset.mode === "setup") {
-        if (passphrase.length < 16) throw new Error("Use a recovery phrase with at least 16 characters.");
-        if (passphrase !== String(formData.get("passphraseConfirm") || "")) {
-          throw new Error("The recovery phrases do not match.");
-        }
-        var bundle = await createPrivateKeyBackup(passphrase);
-        await api("/auth/key-bundle", "POST", {
-          publicKey: bundle.publicKey,
-          privateKeyBackup: bundle.privateKeyBackup
-        });
-        keyBundle = { publicKey: bundle.publicKey, privateKeyBackup: bundle.privateKeyBackup };
-        keyBundleLoaded = true;
-        encryptionPrivateKey = bundle.privateKey;
-      } else {
-        await unlockPrivateKey(passphrase);
-      }
-      if (pendingArtistId) {
-        var queued = pendingArtistId;
-        pendingArtistId = "";
-        return openDirect(queued);
-      }
-      await renderMessages();
-    } catch (error) {
-      var errorNode = document.getElementById("chatKeyError");
-      if (errorNode) errorNode.textContent = error.name === "OperationError"
-        ? "That phrase could not unlock this key. Check it and try again."
-        : error.message;
-    }
-  }
-
-  async function showKeyFingerprints(chat) {
-    var backdrop = document.getElementById("chatCreateBackdrop");
-    if (!backdrop) return;
-    try {
-      var lines = await Promise.all((chat.participants || []).map(async function (person) {
-        return '<div class="chat-key-fingerprint"><strong>' + escapeHtml(person.displayName) + '</strong><code>' +
-          escapeHtml(await fingerprint(person.publicKey)) + '</code></div>';
-      }));
-      backdrop.innerHTML = '<div class="chat-create-card" role="dialog" aria-modal="true" aria-labelledby="chatKeyInfoTitle">' +
-        '<button class="chat-create-close" type="button" aria-label="Close" data-close-chat-create>×</button>' +
-        '<div class="eyebrow">Encryption details</div><h2 id="chatKeyInfoTitle">Check the conversation keys.</h2>' +
-        '<p>Compare these fingerprints with each artist through a trusted separate channel. This helps detect a changed or substituted key.</p>' +
-        '<div class="chat-fingerprint-list">' + lines.join("") + '</div>' +
-        '<p class="chat-auth-hint">Keys are not independently verified automatically. The website host controls the code delivered to your browser.</p>' +
-        '<div class="chat-create-actions"><button class="btn btn-dark" type="button" data-close-chat-create>Done</button></div></div>';
-      backdrop.classList.remove("hidden");
-    } catch (error) {
-      notify(error.message || "Key fingerprints are unavailable.");
     }
   }
 
@@ -661,9 +332,6 @@
       user = result.user;
       serverReady = true;
       socket = null;
-      keyBundle = null;
-      keyBundleLoaded = false;
-      encryptionPrivateKey = null;
       await renderMessages();
     } catch (error) {
       var errorNode = document.getElementById("chatAuthError");
@@ -702,8 +370,7 @@
     try {
       var chat = conversations.find(function (item) { return item.id === form.dataset.chatId; });
       if (!chat) throw new Error("Open the conversation again before sending a message.");
-      var encryptedPayload = await encryptMessage(chat, text);
-      await api("/conversations/" + encodeURIComponent(chat.id) + "/messages", "POST", encryptedPayload);
+      await api("/conversations/" + encodeURIComponent(chat.id) + "/messages", "POST", { text: text, clientId: window.crypto.randomUUID() });
       await renderMessages();
       var composer = document.getElementById("chatMessageText");
       if (composer) composer.focus();
@@ -721,9 +388,6 @@
     apiToken = "";
     try { sessionStorage.removeItem("scenespoolApiToken"); } catch (_) {}
     user = null;
-    keyBundle = null;
-    keyBundleLoaded = false;
-    encryptionPrivateKey = null;
     conversations = [];
     activeId = "";
     authMode = "login";
@@ -759,9 +423,8 @@
     var logoutButton = target.closest("[data-chat-logout]");
     var deleteAccountButton = target.closest("[data-delete-account]");
     var retry = target.closest("[data-retry-messages]");
-    var keyFingerprints = target.closest("[data-key-fingerprints]");
     var backdrop = target.id === "chatCreateBackdrop";
-    if (!(nav || message || open || newChat || close || authToggle || logoutButton || deleteAccountButton || retry || keyFingerprints || backdrop)) return;
+    if (!(nav || message || open || newChat || close || authToggle || logoutButton || deleteAccountButton || retry || backdrop)) return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (nav) return renderMessages();
@@ -772,10 +435,6 @@
     }
     if (newChat) return showCreator(newChat.dataset.newChat);
     if (close || backdrop) return closeCreator();
-    if (keyFingerprints) {
-      var activeChat = conversations.find(function (item) { return item.id === activeId; });
-      if (activeChat) return showKeyFingerprints(activeChat);
-    }
     if (authToggle) {
       authMode = authToggle.dataset.authMode;
       return renderMessages();
@@ -792,12 +451,11 @@
   document.addEventListener("submit", function (event) {
     var form = event.target;
     if (!form || !form.id) return;
-    if (form.id !== "chatAuthForm" && form.id !== "chatCreateForm" && form.id !== "chatComposeForm" && form.id !== "chatKeyForm") return;
+    if (form.id !== "chatAuthForm" && form.id !== "chatCreateForm" && form.id !== "chatComposeForm") return;
     event.preventDefault();
     event.stopImmediatePropagation();
     if (form.id === "chatAuthForm") return submitAuth(form);
     if (form.id === "chatCreateForm") return submitCreator(form);
-    if (form.id === "chatKeyForm") return submitKeySetup(form);
     return sendMessage(form);
   }, true);
 
