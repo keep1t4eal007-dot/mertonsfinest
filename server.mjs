@@ -23,6 +23,7 @@ const port = Number(process.env.PORT || 3000);
 const production = process.env.NODE_ENV === "production";
 const sessionSecret = process.env.SESSION_SECRET || "";
 const databaseUrl = process.env.DATABASE_URL || "";
+const ownerSetupToken = process.env.OWNER_SETUP_TOKEN || "";
 const frontendOrigins = new Set(
   (process.env.FRONTEND_ORIGINS || "https://project43331.websitepublisher.ai")
     .split(",").map(value => value.trim()).filter(Boolean)
@@ -163,6 +164,14 @@ function currentUserId(req) {
   return Number(req.userId || req.session?.userId || 0);
 }
 
+async function requireOwner(req, res, next) {
+  try {
+    const result = await pool.query("SELECT role FROM artists WHERE id=$1", [currentUserId(req)]);
+    if (result.rows[0]?.role !== "owner") return res.status(403).json({ error: "Owner access required." });
+    next();
+  } catch (error) { next(error); }
+}
+
 function bearerToken(req) {
   const match = /^Bearer\s+([A-Za-z0-9_-]{40,100})$/i.exec(req.get("authorization") || "");
   return match?.[1] || "";
@@ -193,7 +202,8 @@ function safeUser(row) {
     looking: row.looking || "",
     bio: row.bio || "",
     color: row.profile_color || "#d8e4d2",
-    photo: row.profile_photo || ""
+    photo: row.profile_photo || "",
+    role: row.role || "artist"
   };
 }
 
@@ -243,13 +253,15 @@ async function prepareDatabase() {
     "id BIGSERIAL PRIMARY KEY, email TEXT NOT NULL UNIQUE, display_name TEXT NOT NULL, " +
     "handle TEXT NOT NULL UNIQUE, genre TEXT NOT NULL, city TEXT NOT NULL, " +
     "password_salt TEXT NOT NULL, password_hash TEXT NOT NULL, looking TEXT NOT NULL DEFAULT '', bio TEXT NOT NULL DEFAULT '', " +
-    "profile_color TEXT NOT NULL DEFAULT '#d8e4d2', profile_photo TEXT NOT NULL DEFAULT '', " +
+    "profile_color TEXT NOT NULL DEFAULT '#d8e4d2', profile_photo TEXT NOT NULL DEFAULT '', role TEXT NOT NULL DEFAULT 'artist', " +
     "created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
   );
   await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS looking TEXT NOT NULL DEFAULT ''");
   await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT ''");
   await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS profile_color TEXT NOT NULL DEFAULT '#d8e4d2'");
   await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS profile_photo TEXT NOT NULL DEFAULT ''");
+  await pool.query("ALTER TABLE artists ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'artist'");
+  await pool.query("CREATE UNIQUE INDEX IF NOT EXISTS artists_single_owner_idx ON artists(role) WHERE role='owner'");
   await pool.query(
     "CREATE TABLE IF NOT EXISTS api_tokens (" +
     "token_hash TEXT PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES artists(id) ON DELETE CASCADE, " +
@@ -261,8 +273,13 @@ async function prepareDatabase() {
     "id UUID PRIMARY KEY, artist_id BIGINT NOT NULL REFERENCES artists(id) ON DELETE CASCADE, " +
     "title TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 60), file_name TEXT NOT NULL, " +
     "mime_type TEXT NOT NULL, duration_seconds DOUBLE PRECISION NOT NULL CHECK (duration_seconds > 0 AND duration_seconds <= 600), " +
-    "audio BYTEA NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+    "audio BYTEA NOT NULL, moderation_status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
   );
+  await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS moderation_status TEXT");
+  await pool.query("UPDATE tracks SET moderation_status='approved' WHERE moderation_status IS NULL");
+  await pool.query("ALTER TABLE tracks ALTER COLUMN moderation_status SET DEFAULT 'pending'");
+  await pool.query("ALTER TABLE tracks ALTER COLUMN moderation_status SET NOT NULL");
+  await pool.query("CREATE INDEX IF NOT EXISTS tracks_moderation_idx ON tracks(moderation_status,created_at DESC)");
   await pool.query("CREATE INDEX IF NOT EXISTS tracks_created_idx ON tracks(created_at DESC)");
   await pool.query("CREATE INDEX IF NOT EXISTS tracks_artist_idx ON tracks(artist_id,created_at DESC)");
   await pool.query(
@@ -310,7 +327,7 @@ app.get("/api/auth/me", asyncRoute(async (req, res) => {
   }
   if (!userId) return res.json({ user: null });
   const result = await pool.query(
-    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo FROM artists WHERE id = $1",
+    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,role FROM artists WHERE id = $1",
     [userId]
   );
   if (!result.rows[0]) {
@@ -320,7 +337,18 @@ app.get("/api/auth/me", asyncRoute(async (req, res) => {
   res.json({ user: safeUser(result.rows[0]) });
 }));
 
-app.post("/api/auth/register", sameOrigin, authLimiter, asyncRoute(async (req, res) => {
+app.post(["/api/auth/register", "/api/auth/owner-setup"], sameOrigin, authLimiter, asyncRoute(async (req, res) => {
+  const ownerClaim = req.path === "/api/auth/owner-setup";
+  if (ownerClaim) {
+    const supplied = typeof req.body.ownerSetupToken === "string" ? req.body.ownerSetupToken : "";
+    const expected = Buffer.from(ownerSetupToken);
+    const received = Buffer.from(supplied);
+    if (!ownerSetupToken || expected.length !== received.length || !crypto.timingSafeEqual(expected, received)) {
+      return res.status(403).json({ error: "The owner setup code is invalid." });
+    }
+    const owners = await pool.query("SELECT 1 FROM artists WHERE role='owner' LIMIT 1");
+    if (owners.rows.length) return res.status(409).json({ error: "The owner account has already been claimed." });
+  }
   const displayName = cleanString(req.body.displayName, 60);
   const handle = cleanString(req.body.handle, 24).toLowerCase().replace(/^@/, "");
   const genre = cleanString(req.body.genre, 60);
@@ -336,12 +364,12 @@ app.post("/api/auth/register", sameOrigin, authLimiter, asyncRoute(async (req, r
   let created;
   try {
     created = await pool.query(
-      "INSERT INTO artists (email,display_name,handle,genre,city,password_salt,password_hash) " +
-      "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo",
-      [email, displayName, handle, genre, city, salt, passwordHash]
+      "INSERT INTO artists (email,display_name,handle,genre,city,password_salt,password_hash,role) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,role",
+      [email, displayName, handle, genre, city, salt, passwordHash, ownerClaim ? "owner" : "artist"]
     );
   } catch (error) {
-    if (error.code === "23505") return res.status(409).json({ error: "That email or handle is already in use." });
+    if (error.code === "23505") return res.status(409).json({ error: ownerClaim ? "The owner account has already been claimed." : "That email or handle is already in use." });
     throw error;
   }
   await regenerateSession(req);
@@ -358,7 +386,7 @@ app.post("/api/auth/login", sameOrigin, authLimiter, asyncRoute(async (req, res)
     return res.status(400).json({ error: "Enter a valid email and password." });
   }
   const result = await pool.query(
-    "SELECT id,email,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,password_salt,password_hash FROM artists WHERE email = $1",
+    "SELECT id,email,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,password_salt,password_hash,role FROM artists WHERE email = $1",
     [email]
   );
   const artist = result.rows[0];
@@ -426,7 +454,7 @@ app.get("/api/artists", publicContentLimiter, asyncRoute(async (req, res) => {
   const search = cleanString(req.query.search, 80);
   const result = await pool.query(
     "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo FROM artists " +
-    "WHERE ($1 = '' OR display_name ILIKE '%' || $1 || '%' OR handle ILIKE '%' || $1 || '%' " +
+    "WHERE role IN ('artist','owner') AND ($1 = '' OR display_name ILIKE '%' || $1 || '%' OR handle ILIKE '%' || $1 || '%' " +
     "OR genre ILIKE '%' || $1 || '%' OR city ILIKE '%' || $1 || '%') " +
     "ORDER BY display_name LIMIT 100",
     [search]
@@ -436,7 +464,7 @@ app.get("/api/artists", publicContentLimiter, asyncRoute(async (req, res) => {
 
 app.get("/api/artists/me", requireUser, asyncRoute(async (req, res) => {
   const result = await pool.query(
-    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo FROM artists WHERE id=$1",
+    "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,role FROM artists WHERE id=$1",
     [currentUserId(req)]
   );
   if (!result.rows[0]) return res.status(404).json({ error: "Artist account not found." });
@@ -460,7 +488,7 @@ app.patch("/api/artists/me", sameOrigin, requireUser, asyncRoute(async (req, res
   try {
     const result = await pool.query(
       "UPDATE artists SET display_name=$1,handle=$2,genre=$3,city=$4,looking=$5,bio=$6,profile_color=$7,profile_photo=$8 " +
-      "WHERE id=$9 RETURNING id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo",
+      "WHERE id=$9 RETURNING id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo,role",
       [displayName, handle, genre, city, looking, bio, profileColor, profilePhoto, currentUserId(req)]
     );
     if (!result.rows[0]) return res.status(404).json({ error: "Artist account not found." });
@@ -516,7 +544,7 @@ const trackUploadLimiter = rateLimit({
 app.get("/api/tracks", publicContentLimiter, asyncRoute(async (_req, res) => {
   const result = await pool.query(
     "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.duration_seconds,t.created_at, " +
-    "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id ORDER BY t.created_at DESC LIMIT 200"
+    "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.moderation_status='approved' ORDER BY t.created_at DESC LIMIT 200"
   );
   res.json({ tracks: result.rows.map(publicTrack) });
 }));
@@ -565,10 +593,40 @@ app.post("/api/tracks", sameOrigin, requireUser, trackUploadLimiter,
   })
 );
 
+app.get("/api/tracks/manage", requireUser, asyncRoute(async (req, res) => {
+  const result = await pool.query(
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
+    "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.artist_id=$1 ORDER BY t.created_at DESC",
+    [currentUserId(req)]
+  );
+  res.json({ tracks: result.rows.map(row => ({ ...publicTrack(row), status: row.moderation_status })) });
+}));
+
+app.get("/api/owner/tracks", requireUser, requireOwner, asyncRoute(async (_req, res) => {
+  const result = await pool.query(
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
+    "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.moderation_status='pending' ORDER BY t.created_at ASC LIMIT 100"
+  );
+  res.json({ tracks: result.rows.map(row => ({ ...publicTrack(row), status: row.moderation_status })) });
+}));
+
+app.patch("/api/owner/tracks/:trackId", sameOrigin, requireUser, requireOwner, asyncRoute(async (req, res) => {
+  const status = req.body.status;
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.trackId) || !["approved", "rejected"].includes(status)) {
+    return res.status(400).json({ error: "Choose approve or reject for this track." });
+  }
+  const result = await pool.query(
+    "UPDATE tracks SET moderation_status=$1 WHERE id=$2 AND moderation_status='pending' RETURNING id",
+    [status, req.params.trackId]
+  );
+  if (!result.rows[0]) return res.status(404).json({ error: "This pending track was not found." });
+  res.json({ updated: true, status });
+}));
+
 app.get("/api/tracks/:trackId/audio", publicContentLimiter, asyncRoute(async (req, res) => {
   if (!/^[0-9a-f-]{36}$/i.test(req.params.trackId)) return res.status(404).end();
   const result = await pool.query(
-    "SELECT audio,mime_type,file_name FROM tracks WHERE id=$1",
+    "SELECT audio,mime_type,file_name FROM tracks WHERE id=$1 AND moderation_status='approved'",
     [req.params.trackId]
   );
   const row = result.rows[0];
