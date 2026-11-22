@@ -37,6 +37,7 @@ if (!production) {
 }
 const MAX_TRACK_BYTES = 20 * 1024 * 1024;
 const MAX_TRACK_STORAGE_BYTES = 600 * 1024 * 1024;
+const MAX_COVER_BYTES = 5 * 1024 * 1024;
 const MAX_MONTHLY_AUDIO_BYTES = 3500 * 1000 * 1000;
 const MAX_TRACKS_PER_ARTIST = 20;
 const AUDIO_MIME_BY_EXTENSION = {
@@ -60,7 +61,7 @@ app.use((req, res, next) => {
   const origin = req.get("origin");
   if (origin && frontendOrigins.has(origin)) {
     res.set("Access-Control-Allow-Origin", origin);
-    res.set("Access-Control-Allow-Methods", "GET,POST,PATCH,DELETE,OPTIONS");
+    res.set("Access-Control-Allow-Methods", "GET,POST,PATCH,PUT,DELETE,OPTIONS");
     res.set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-File-Name");
     res.set("Access-Control-Max-Age", "600");
     res.vary("Origin");
@@ -300,8 +301,10 @@ async function prepareDatabase() {
     "id UUID PRIMARY KEY, artist_id BIGINT NOT NULL REFERENCES artists(id) ON DELETE CASCADE, " +
     "title TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 60), file_name TEXT NOT NULL, " +
     "mime_type TEXT NOT NULL, duration_seconds DOUBLE PRECISION NOT NULL CHECK (duration_seconds > 0 AND duration_seconds <= 600), " +
-    "audio BYTEA NOT NULL, moderation_status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+    "audio BYTEA NOT NULL, cover_art BYTEA, cover_mime_type TEXT, moderation_status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
   );
+  await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS cover_art BYTEA");
+  await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS cover_mime_type TEXT");
   await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS moderation_status TEXT");
   await pool.query("UPDATE tracks SET moderation_status='approved' WHERE moderation_status IS NULL");
   await pool.query("ALTER TABLE tracks ALTER COLUMN moderation_status SET DEFAULT 'pending'");
@@ -543,8 +546,16 @@ function publicTrack(row) {
     mimeType: row.mime_type,
     duration: Number(row.duration_seconds),
     addedAt: row.created_at,
-    audioUrl: "/api/tracks/" + row.id + "/audio"
+    audioUrl: "/api/tracks/" + row.id + "/audio",
+    coverArtUrl: row.cover_mime_type ? "/api/tracks/" + row.id + "/cover" : ""
   };
+}
+
+function detectedImageMime(buffer) {
+  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]))) return "image/png";
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) return "image/jpeg";
+  if (buffer.length >= 12 && buffer.toString("ascii", 0, 4) === "RIFF" && buffer.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  return "";
 }
 
 async function inspectAudioDuration(buffer, fileName) {
@@ -576,7 +587,7 @@ const trackUploadLimiter = rateLimit({
 });
 app.get("/api/tracks", publicContentLimiter, asyncRoute(async (_req, res) => {
   const result = await pool.query(
-    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.duration_seconds,t.created_at, " +
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.created_at, " +
     "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.moderation_status='approved' ORDER BY t.created_at DESC LIMIT 200"
   );
   res.json({ tracks: result.rows.map(publicTrack) });
@@ -605,7 +616,7 @@ app.post("/api/tracks", sameOrigin, requireUser, trackUploadLimiter,
     if (duration > 600) return res.status(400).json({ error: "Tracks must be 10 minutes or shorter." });
     const artistId = currentUserId(req);
     const limits = await pool.query(
-      "SELECT count(*)::int AS tracks,COALESCE(sum(octet_length(audio)),0)::bigint AS bytes FROM tracks"
+      "SELECT count(*)::int AS tracks,COALESCE(sum(octet_length(audio)+COALESCE(octet_length(cover_art),0)),0)::bigint AS bytes FROM tracks"
     );
     const ownCount = await pool.query("SELECT count(*)::int AS tracks FROM tracks WHERE artist_id=$1", [artistId]);
     if (Number(ownCount.rows[0].tracks) >= MAX_TRACKS_PER_ARTIST) {
@@ -634,9 +645,49 @@ app.post("/api/tracks", sameOrigin, requireUser, trackUploadLimiter,
   })
 );
 
+app.put("/api/tracks/:trackId/cover", sameOrigin, requireUser,
+  express.raw({ type: () => true, limit: MAX_COVER_BYTES }), asyncRoute(async (req, res) => {
+    if (!/^[0-9a-f-]{36}$/i.test(req.params.trackId)) return res.status(404).json({ error: "Track not found." });
+    const bytes = req.body;
+    if (!Buffer.isBuffer(bytes) || bytes.length < 16) return res.status(400).json({ error: "Choose a valid cover image." });
+    const detected = detectedImageMime(bytes);
+    const declared = cleanString(req.get("content-type"), 80).split(";")[0].toLowerCase();
+    if (!detected || detected !== declared) return res.status(415).json({ error: "Cover art must be a valid JPEG, PNG or WebP image." });
+    const existing = await pool.query("SELECT octet_length(cover_art) AS bytes FROM tracks WHERE id=$1 AND artist_id=$2", [req.params.trackId, currentUserId(req)]);
+    if (!existing.rows[0]) return res.status(404).json({ error: "Track not found." });
+    const stored = await pool.query("SELECT COALESCE(sum(octet_length(audio)+COALESCE(octet_length(cover_art),0)),0)::bigint AS bytes FROM tracks");
+    const total = Number(stored.rows[0].bytes) - Number(existing.rows[0].bytes || 0) + bytes.length;
+    if (total > MAX_TRACK_STORAGE_BYTES) return res.status(507).json({ error: "The shared music shelf has reached its storage limit." });
+    await pool.query("UPDATE tracks SET cover_art=$1,cover_mime_type=$2 WHERE id=$3 AND artist_id=$4", [bytes, detected, req.params.trackId, currentUserId(req)]);
+    res.json({ saved: true });
+  })
+);
+
+app.get("/api/owner/tracks/:trackId/cover", requireUser, requireOwner, asyncRoute(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.trackId)) return res.status(404).end();
+  const result = await pool.query("SELECT cover_art,cover_mime_type FROM tracks WHERE id=$1 AND moderation_status='pending'", [req.params.trackId]);
+  const row = result.rows[0];
+  if (!row || !row.cover_art) return res.status(404).end();
+  res.set("Content-Type", row.cover_mime_type);
+  res.set("X-Content-Type-Options", "nosniff");
+  res.set("Cache-Control", "no-store");
+  res.end(row.cover_art);
+}));
+
+app.get("/api/tracks/:trackId/cover", publicContentLimiter, asyncRoute(async (req, res) => {
+  if (!/^[0-9a-f-]{36}$/i.test(req.params.trackId)) return res.status(404).end();
+  const result = await pool.query("SELECT cover_art,cover_mime_type FROM tracks WHERE id=$1 AND moderation_status='approved'", [req.params.trackId]);
+  const row = result.rows[0];
+  if (!row || !row.cover_art) return res.status(404).end();
+  res.set("Content-Type", row.cover_mime_type);
+  res.set("X-Content-Type-Options", "nosniff");
+  res.set("Cache-Control", "public, max-age=3600");
+  res.end(row.cover_art);
+}));
+
 app.get("/api/tracks/manage", requireUser, asyncRoute(async (req, res) => {
   const result = await pool.query(
-    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
     "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.artist_id=$1 ORDER BY t.created_at DESC",
     [currentUserId(req)]
   );
@@ -645,7 +696,7 @@ app.get("/api/tracks/manage", requireUser, asyncRoute(async (req, res) => {
 
 app.get("/api/owner/tracks", requireUser, requireOwner, asyncRoute(async (_req, res) => {
   const result = await pool.query(
-    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
     "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.moderation_status='pending' ORDER BY t.created_at ASC LIMIT 100"
   );
   res.json({ tracks: result.rows.map(row => ({ ...publicTrack(row), status: row.moderation_status })) });
