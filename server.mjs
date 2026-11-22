@@ -454,7 +454,7 @@ app.get("/api/artists", publicContentLimiter, asyncRoute(async (req, res) => {
   const search = cleanString(req.query.search, 80);
   const result = await pool.query(
     "SELECT id,display_name,handle,genre,city,looking,bio,profile_color,profile_photo FROM artists " +
-    "WHERE role IN ('artist','owner') AND ($1 = '' OR display_name ILIKE '%' || $1 || '%' OR handle ILIKE '%' || $1 || '%' " +
+    "WHERE role='artist' AND ($1 = '' OR display_name ILIKE '%' || $1 || '%' OR handle ILIKE '%' || $1 || '%' " +
     "OR genre ILIKE '%' || $1 || '%' OR city ILIKE '%' || $1 || '%') " +
     "ORDER BY display_name LIMIT 100",
     [search]
