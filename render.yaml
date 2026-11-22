@@ -5,7 +5,7 @@ services:
     repo: https://github.com/keep1t4eal007-dot/mertonsfinest
     branch: main
     region: frankfurt
-    plan: 0.5c-512mb
+    plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
     healthCheckPath: /api/health
@@ -28,7 +28,5 @@ databases:
     user: scenespool
     region: frankfurt
     postgresMajorVersion: "18"
-    plan: 0.1c-256mb
-    diskSizeGB: 1
-    storageAutoscalingEnabled: false
+    plan: free
     ipAllowList: []
