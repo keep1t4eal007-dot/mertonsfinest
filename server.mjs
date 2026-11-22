@@ -301,9 +301,10 @@ async function prepareDatabase() {
     "id UUID PRIMARY KEY, artist_id BIGINT NOT NULL REFERENCES artists(id) ON DELETE CASCADE, " +
     "title TEXT NOT NULL CHECK (char_length(title) BETWEEN 1 AND 60), file_name TEXT NOT NULL, " +
     "mime_type TEXT NOT NULL, duration_seconds DOUBLE PRECISION NOT NULL CHECK (duration_seconds > 0 AND duration_seconds <= 600), " +
-    "audio BYTEA NOT NULL, cover_art BYTEA, cover_mime_type TEXT, moderation_status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+    "audio BYTEA NOT NULL, cover_art BYTEA, cover_mime_type TEXT, radio_opt_in BOOLEAN NOT NULL DEFAULT false, moderation_status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
   );
   await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS cover_art BYTEA");
+  await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS radio_opt_in BOOLEAN NOT NULL DEFAULT false");
   await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS cover_mime_type TEXT");
   await pool.query("ALTER TABLE tracks ADD COLUMN IF NOT EXISTS moderation_status TEXT");
   await pool.query("UPDATE tracks SET moderation_status='approved' WHERE moderation_status IS NULL");
@@ -543,6 +544,7 @@ function publicTrack(row) {
     artistHandle: row.handle,
     title: row.title,
     fileName: row.file_name,
+    radioOptIn: row.radio_opt_in === true,
     mimeType: row.mime_type,
     duration: Number(row.duration_seconds),
     addedAt: row.created_at,
@@ -587,7 +589,7 @@ const trackUploadLimiter = rateLimit({
 });
 app.get("/api/tracks", publicContentLimiter, asyncRoute(async (_req, res) => {
   const result = await pool.query(
-    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.created_at, " +
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.radio_opt_in,t.created_at, " +
     "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.moderation_status='approved' ORDER BY t.created_at DESC LIMIT 200"
   );
   res.json({ tracks: result.rows.map(publicTrack) });
@@ -596,6 +598,7 @@ app.get("/api/tracks", publicContentLimiter, asyncRoute(async (_req, res) => {
 app.post("/api/tracks", sameOrigin, requireUser, trackUploadLimiter,
   express.raw({ type: () => true, limit: MAX_TRACK_BYTES }), asyncRoute(async (req, res) => {
     const title = cleanString(req.query.title, 60);
+    const radioOptIn = req.query.radioOptIn === "true";
     let fileName = cleanString(req.get("x-file-name"), 120);
     try { fileName = decodeURIComponent(fileName); } catch {}
     fileName = path.basename(fileName).replace(/[\r\n\0]/g, "");
@@ -628,9 +631,9 @@ app.post("/api/tracks", sameOrigin, requireUser, trackUploadLimiter,
     const mimeType = cleanString(req.get("content-type"), 80).split(";")[0].toLowerCase();
     const normalizedMime = mimeType.startsWith("audio/") ? mimeType : AUDIO_MIME_BY_EXTENSION[extension];
     const saved = await pool.query(
-      "INSERT INTO tracks (id,artist_id,title,file_name,mime_type,duration_seconds,audio) " +
-      "VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id,artist_id,title,file_name,mime_type,duration_seconds,created_at",
-      [crypto.randomUUID(), artistId, title, fileName, normalizedMime, duration, bytes]
+      "INSERT INTO tracks (id,artist_id,title,file_name,mime_type,duration_seconds,audio,radio_opt_in) " +
+      "VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id,artist_id,title,file_name,mime_type,duration_seconds,radio_opt_in,created_at",
+      [crypto.randomUUID(), artistId, title, fileName, normalizedMime, duration, bytes, radioOptIn]
     );
     const artist = await pool.query("SELECT display_name,handle FROM artists WHERE id=$1", [artistId]);
     await notifyOwnerSafely("Track uploaded for SceneSpool review", [
@@ -687,7 +690,7 @@ app.get("/api/tracks/:trackId/cover", publicContentLimiter, asyncRoute(async (re
 
 app.get("/api/tracks/manage", requireUser, asyncRoute(async (req, res) => {
   const result = await pool.query(
-    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.radio_opt_in,t.created_at,t.moderation_status, " +
     "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.artist_id=$1 ORDER BY t.created_at DESC",
     [currentUserId(req)]
   );
@@ -696,7 +699,7 @@ app.get("/api/tracks/manage", requireUser, asyncRoute(async (req, res) => {
 
 app.get("/api/owner/tracks", requireUser, requireOwner, asyncRoute(async (_req, res) => {
   const result = await pool.query(
-    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.created_at,t.moderation_status, " +
+    "SELECT t.id,t.artist_id,t.title,t.file_name,t.mime_type,t.cover_mime_type,t.duration_seconds,t.radio_opt_in,t.created_at,t.moderation_status, " +
     "a.display_name,a.handle FROM tracks t JOIN artists a ON a.id=t.artist_id WHERE t.moderation_status='pending' ORDER BY t.created_at ASC LIMIT 100"
   );
   res.json({ tracks: result.rows.map(row => ({ ...publicTrack(row), status: row.moderation_status })) });
