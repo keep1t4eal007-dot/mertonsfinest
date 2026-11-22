@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f5f0e5">
+<title>Privacy & beta data — SceneSpool</title>
+<meta name="description" content="What SceneSpool stores, what appears publicly, and how encrypted messages work during this beta.">
+<meta name="robots" content="noindex, nofollow">
+<meta property="og:title" content="Privacy & beta data — SceneSpool">
+<meta property="og:description" content="What SceneSpool stores, what appears publicly, and how encrypted messages work during this beta.">
+<meta property="og:type" content="website">
+<style>
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap');
+:root{--paper:#f5f0e5;--ink:#20352c;--line:#ddd6c7;--red:#a93b49;--mono:'DM Mono',monospace;--sans:'DM Sans',sans-serif;--serif:'Playfair Display',Georgia,serif}
+*{box-sizing:border-box}body{margin:0;background:var(--paper);color:var(--ink);font-family:var(--sans);line-height:1.65}.wrap{width:min(820px,calc(100% - 36px));margin:0 auto}.top{padding:15px 0;border-bottom:1px solid var(--line);font:10px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:#617063}.brand{padding:30px 0 20px}.brand a{color:inherit;text-decoration:none;font-weight:700;font-size:17px}.brand-mark{display:inline-grid;place-items:center;width:30px;height:30px;border-radius:50%;margin-right:9px;background:var(--red);color:white}.eyebrow{font:10px var(--mono);letter-spacing:.13em;text-transform:uppercase;color:#496b55}.eyebrow:before{content:"";display:inline-block;width:18px;height:1px;margin:0 8px 3px 0;background:#75886c}h1{font:600 clamp(38px,7vw,58px)/1.05 var(--serif);letter-spacing:-.04em;margin:16px 0}h1 em{color:var(--red)}.lead{font-size:16px;color:#657066;max-width:700px}.notice{margin:22px 0;padding:15px 17px;background:#fffdf7;border:1px solid var(--line);border-left:4px solid var(--red);border-radius:4px}.card{padding:22px 0;border-top:1px solid var(--line)}h2{font:600 24px var(--serif);margin:0 0 8px}p{margin:8px 0 12px;color:#5e695f}.back{display:inline-block;margin:12px 0 50px;color:#31533f;font:11px var(--mono)}.footer{border-top:1px solid var(--line);padding:20px 0 30px;font:10px var(--mono);color:#6c766c}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="top">UK music community · beta privacy summary</div>
+<div class="brand"><a href="/"><span class="brand-mark">♫</span>SceneSpool UK</a></div>
+<main>
+<div class="eyebrow">Updated 22 November 2026</div>
+<h1>Your data, <em>in the scene.</em></h1>
+<p class="lead">SceneSpool is a beta community for UK artists. The site uses a shared server for artist accounts, public profiles, music uploads and encrypted messages.</p>
+<div class="notice"><strong>Before you join:</strong> profile details and uploaded tracks are public. Accounts are not email-verified, password reset is not available, and this beta has not had an independent security audit. The operator's privacy contact details are not yet listed; share only information you are comfortable putting in a public artist profile.</div>
+<section class="card">
+<h2>Artist accounts and profiles</h2>
+<p>Creating an account stores your email address, artist name, handle, genre, city and a salted password hash in the shared database. Your email and password hash are not shown on your public profile. Your artist name, handle, genre, city, bio, collaboration interests, profile colour and profile picture are shown in the public directory.</p>
+<p>Use the <strong>Delete account</strong> control in Messages to remove your account, profile, uploaded tracks and messages sent from that account from the live database. The action is permanent. Database backups may retain deleted data for a limited backup period.</p>
+</section>
+<section class="card">
+<h2>Music uploads</h2>
+<p>Tracks are public and can be played by visitors, including through SceneSpool Radio. Each upload must be 20 MB or smaller and no longer than 10 minutes. Each account can upload up to 20 tracks. The shared shelf has a 600 MB storage cap and a 3.5 GB monthly audio delivery cap; new uploads or playback may pause when a cap is reached.</p>
+<p>Only upload audio you have the rights to share. Your track title, file name, artist name and track audio are stored in the shared database.</p>
+</section>
+<section class="card">
+<h2>Private and group messages</h2>
+<p>New message text is encrypted in your browser before it is sent. The server stores encrypted message text and encrypted key envelopes. It also stores account details, conversation members, who sent each message, timestamps and approximate message sizes.</p>
+<p>Your separate message recovery phrase is entered only in your browser and is not sent to the server. You need it to unlock encrypted message history on a new device. If you lose it, that history cannot be recovered. Key fingerprints are not automatically verified; compare them through a trusted separate channel. This version does not provide forward secrecy. The website host controls the code sent to browsers, and a malicious code change could read text before encryption or after decryption.</p>
+<p>Deleting your account removes your messages from the live database, but other people may already have seen or copied their contents.</p>
+</section>
+<section class="card">
+<h2>Sign-in and service providers</h2>
+<p>The browser keeps a short-lived sign-in token in session storage for up to 14 days; the server stores a hash of that token. The server and database run on Render. The public website is hosted by WebsitePublisher. SoundCloud may load when you use the radio, and Google Fonts may receive standard technical data when typefaces load. External event and creator links are governed by the destinations' own privacy terms.</p>
+</section>
+<section class="card">
+<h2>Beta limits and contact</h2>
+<p>Email ownership is not verified, password recovery is not configured, and there is no automatic key-verification system. The operator's privacy contact details have not been supplied for this page yet. Add a public contact route before inviting a wider community or treating this beta as a fully supported service.</p>
+</section>
+</main>
+<a class="back" href="/">← Back to SceneSpool</a>
+<div class="footer">SCENESPOOL · UK · BETA PRIVACY SUMMARY</div>
+</div>
+</body>
+</html>
