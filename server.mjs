@@ -24,6 +24,9 @@ const production = process.env.NODE_ENV === "production";
 const sessionSecret = process.env.SESSION_SECRET || "";
 const databaseUrl = process.env.DATABASE_URL || "";
 const ownerSetupToken = process.env.OWNER_SETUP_TOKEN || "";
+const ownerNotificationEmail = process.env.OWNER_NOTIFICATION_EMAIL || "";
+const resendApiKey = process.env.RESEND_API_KEY || "";
+const resendFromEmail = process.env.RESEND_FROM_EMAIL || "";
 const frontendOrigins = new Set(
   (process.env.FRONTEND_ORIGINS || "https://project43331.websitepublisher.ai")
     .split(",").map(value => value.trim()).filter(Boolean)
@@ -190,6 +193,30 @@ async function issueApiToken(userId) {
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+async function notifyOwner(subject, lines) {
+  if (!ownerNotificationEmail || !resendApiKey || !resendFromEmail) {
+    console.warn("Owner email notifications are disabled until their sender settings are configured.");
+    return;
+  }
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + resendApiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      from: resendFromEmail,
+      to: [ownerNotificationEmail],
+      subject: subject.slice(0, 180),
+      text: lines.join("\n").slice(0, 6000)
+    }),
+    signal: AbortSignal.timeout(8000)
+  });
+  if (!response.ok) throw new Error("Email provider returned HTTP " + response.status);
+}
+
+async function notifyOwnerSafely(subject, lines) {
+  try { await notifyOwner(subject, lines); }
+  catch (error) { console.error("Owner email notification failed:", error.message); }
 }
 
 function safeUser(row) {
@@ -376,6 +403,12 @@ app.post(["/api/auth/register", "/api/auth/owner-setup"], sameOrigin, authLimite
   req.session.userId = Number(created.rows[0].id);
   await saveSession(req);
   const token = await issueApiToken(created.rows[0].id);
+  await notifyOwnerSafely("New SceneSpool account", [
+    "A new account was created on SceneSpool.",
+    "Artist name: " + displayName,
+    "Handle: @" + handle,
+    "Account type: " + (ownerClaim ? "Owner" : "Artist")
+  ]);
   res.status(201).json({ user: safeUser(created.rows[0]), token });
 }));
 
@@ -589,6 +622,14 @@ app.post("/api/tracks", sameOrigin, requireUser, trackUploadLimiter,
       [crypto.randomUUID(), artistId, title, fileName, normalizedMime, duration, bytes]
     );
     const artist = await pool.query("SELECT display_name,handle FROM artists WHERE id=$1", [artistId]);
+    await notifyOwnerSafely("Track uploaded for SceneSpool review", [
+      "A new track was uploaded and is waiting for owner review.",
+      "Track: " + title,
+      "Artist: " + artist.rows[0].display_name + " (@" + artist.rows[0].handle + ")",
+      "Duration: " + Math.floor(duration / 60) + ":" + String(Math.floor(duration % 60)).padStart(2, "0"),
+      "File: " + fileName,
+      "Review it in the SceneSpool music shelf."
+    ]);
     res.status(201).json({ track: publicTrack({ ...saved.rows[0], ...artist.rows[0] }) });
   })
 );
